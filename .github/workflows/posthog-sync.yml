@@ -1,7 +1,21 @@
 name: PostHog sync
+# Reconciles an app's cja-declared PostHog insights, dashboards and alerts after deploy.
+#
+# Caller example:
+#
+#   jobs:
+#     posthog:
+#       needs: deploy
+#       uses: coreyja-studio/.github/.github/workflows/posthog-sync.yml@main
+#       secrets:
+#         POSTHOG_PERSONAL_API_KEY: ${{ secrets.POSTHOG_PERSONAL_API_KEY }}
+#         POSTHOG_PROJECT_ID: ${{ secrets.POSTHOG_PROJECT_ID }}
+#
 # Map both secrets explicitly in the caller, including cross-org calls.
 # A missing mapping produces the same skip notice as an unset repository secret.
 # Restrict the key to one project and dashboard:write, insight:write, alert:write.
+# The sync binary is compiled in a step without the secrets; only the run step sees them.
+# Callers that override sync-command for another binary should override build-command too.
 on:
   workflow_call:
     secrets:
@@ -10,6 +24,10 @@ on:
       POSTHOG_PROJECT_ID:
         required: false
     inputs:
+      build-command:
+        description: Command to compile the sync binary (runs without PostHog secrets)
+        type: string
+        default: cargo build --locked --bin posthog-sync
       sync-command:
         description: Command to reconcile the application's PostHog declarations
         type: string
@@ -36,15 +54,28 @@ jobs:
         with:
           path: ~/.cache/cja
           key: cja-tools-${{ runner.os }}-${{ runner.arch }}-tsc-7.0.2-tailwindcss-4.3.3
+      - name: Check PostHog configuration
+        id: check
+        env:
+          POSTHOG_PERSONAL_API_KEY: ${{ secrets.POSTHOG_PERSONAL_API_KEY }}
+          POSTHOG_PROJECT_ID: ${{ secrets.POSTHOG_PROJECT_ID }}
+        run: |
+          if [ -z "${POSTHOG_PERSONAL_API_KEY:-}" ] || [ -z "${POSTHOG_PROJECT_ID:-}" ]; then
+            echo "::notice::PostHog sync skipped: API key or project ID missing"
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Build sync binary
+        if: steps.check.outputs.enabled == 'true'
+        env:
+          SQLX_OFFLINE: "true"
+        run: ${{ inputs.build-command }}
       - name: Sync declarations to PostHog
+        if: steps.check.outputs.enabled == 'true'
         env:
           POSTHOG_PERSONAL_API_KEY: ${{ secrets.POSTHOG_PERSONAL_API_KEY }}
           POSTHOG_PROJECT_ID: ${{ secrets.POSTHOG_PROJECT_ID }}
           POSTHOG_API_HOST: ${{ vars.POSTHOG_API_HOST }}
           SQLX_OFFLINE: "true"
-        run: |
-          if [ -z "${POSTHOG_PERSONAL_API_KEY:-}" ] || [ -z "${POSTHOG_PROJECT_ID:-}" ]; then
-            echo "::notice::PostHog sync skipped: API key or project ID missing"
-            exit 0
-          fi
-          ${{ inputs.sync-command }}
+        run: ${{ inputs.sync-command }}
