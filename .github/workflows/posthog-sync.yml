@@ -1,0 +1,50 @@
+name: PostHog sync
+# Map both secrets explicitly in the caller, including cross-org calls.
+# A missing mapping produces the same skip notice as an unset repository secret.
+# Restrict the key to one project and dashboard:write, insight:write, alert:write.
+on:
+  workflow_call:
+    secrets:
+      POSTHOG_PERSONAL_API_KEY:
+        required: false
+      POSTHOG_PROJECT_ID:
+        required: false
+    inputs:
+      sync-command:
+        description: Command to reconcile the application's PostHog declarations
+        type: string
+        default: cargo run --locked --bin posthog-sync
+      working-directory:
+        description: Directory containing the application
+        type: string
+        default: .
+jobs:
+  posthog-sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    concurrency:
+      group: posthog-sync-${{ github.repository }}-${{ inputs.working-directory }}
+      cancel-in-progress: false
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/cja
+          key: cja-tools-${{ runner.os }}-${{ runner.arch }}-tsc-7.0.2-tailwindcss-4.3.3
+      - name: Sync declarations to PostHog
+        env:
+          POSTHOG_PERSONAL_API_KEY: ${{ secrets.POSTHOG_PERSONAL_API_KEY }}
+          POSTHOG_PROJECT_ID: ${{ secrets.POSTHOG_PROJECT_ID }}
+          POSTHOG_API_HOST: ${{ vars.POSTHOG_API_HOST }}
+          SQLX_OFFLINE: "true"
+        run: |
+          if [ -z "${POSTHOG_PERSONAL_API_KEY:-}" ] || [ -z "${POSTHOG_PROJECT_ID:-}" ]; then
+            echo "::notice::PostHog sync skipped: API key or project ID missing"
+            exit 0
+          fi
+          ${{ inputs.sync-command }}
