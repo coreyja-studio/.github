@@ -1,0 +1,90 @@
+name: PostHog sync
+# Reconciles an app's cja-declared PostHog insights, dashboards and alerts after deploy.
+#
+# Caller example:
+#
+#   jobs:
+#     posthog:
+#       needs: deploy
+#       uses: coreyja-studio/.github/.github/workflows/posthog-sync.yml@main
+#       with:
+#         project-id: ${{ vars.POSTHOG_PROJECT_ID }}
+#       secrets:
+#         POSTHOG_PERSONAL_API_KEY: ${{ secrets.POSTHOG_PERSONAL_API_KEY }}
+#
+# The project id is a configuration variable, not a secret: pass it as the project-id input.
+# Only the personal API key is a secret. Map it explicitly in the caller, including
+# cross-org calls (secrets: inherit only works within one org).
+# A missing key or project id produces a skip notice instead of a failure.
+# Restrict the key to one project and dashboard:write, insight:write, alert:write.
+# The sync binary is compiled in a step without the secrets; only the run step sees them.
+# Callers that override sync-command for another binary should override build-command too.
+on:
+  workflow_call:
+    secrets:
+      POSTHOG_PERSONAL_API_KEY:
+        required: false
+    inputs:
+      project-id:
+        description: PostHog project id (pass vars.POSTHOG_PROJECT_ID); empty skips the sync
+        type: string
+        default: ""
+      api-host:
+        description: PostHog API host; empty uses https://us.posthog.com
+        type: string
+        default: ""
+      build-command:
+        description: Command to compile the sync binary (runs without PostHog secrets)
+        type: string
+        default: cargo build --locked --bin posthog-sync
+      sync-command:
+        description: Command to reconcile the application's PostHog declarations
+        type: string
+        default: cargo run --locked --bin posthog-sync
+      working-directory:
+        description: Directory containing the application
+        type: string
+        default: .
+jobs:
+  posthog-sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    concurrency:
+      group: posthog-sync-${{ github.repository }}-${{ inputs.working-directory }}
+      cancel-in-progress: false
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/cja
+          key: cja-tools-${{ runner.os }}-${{ runner.arch }}-tsc-7.0.2-tailwindcss-4.3.3
+      - name: Check PostHog configuration
+        id: check
+        env:
+          POSTHOG_PERSONAL_API_KEY: ${{ secrets.POSTHOG_PERSONAL_API_KEY }}
+          POSTHOG_PROJECT_ID: ${{ inputs.project-id }}
+        run: |
+          if [ -z "${POSTHOG_PERSONAL_API_KEY:-}" ] || [ -z "${POSTHOG_PROJECT_ID:-}" ]; then
+            echo "::notice::PostHog sync skipped: API key or project ID missing"
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Build sync binary
+        if: steps.check.outputs.enabled == 'true'
+        env:
+          SQLX_OFFLINE: "true"
+        run: ${{ inputs.build-command }}
+      - name: Sync declarations to PostHog
+        if: steps.check.outputs.enabled == 'true'
+        env:
+          POSTHOG_PERSONAL_API_KEY: ${{ secrets.POSTHOG_PERSONAL_API_KEY }}
+          POSTHOG_PROJECT_ID: ${{ inputs.project-id }}
+          POSTHOG_API_HOST: ${{ inputs.api-host }}
+          SQLX_OFFLINE: "true"
+        run: ${{ inputs.sync-command }}
